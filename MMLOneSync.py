@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 def _resolve_plugin_dir() -> Path:
-    """Find the directory containing this script + the mml_sync package.
+    """Find the directory containing this script + the mml_sync package/zip.
 
     Resolve's Workspace > Scripts launcher runs scripts via exec() and does
     NOT set __file__, so we can't rely on it. Try __file__ first (works when
@@ -25,15 +25,16 @@ def _resolve_plugin_dir() -> Path:
     except NameError:
         pass
     candidates = [
-        # macOS
+        # macOS — system + per-user
+        Path('/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit'),
         Path.home() / 'Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit',
-        # Windows
+        # Windows — per-user
         Path(os.environ.get('APPDATA', '')) / 'Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Edit',
         # Linux
         Path.home() / '.local/share/DaVinciResolve/Fusion/Scripts/Edit',
     ]
     for c in candidates:
-        if (c / 'mml_sync').is_dir():
+        if (c / 'mml_sync.zip').is_file() or (c / 'mml_sync').is_dir():
             return c
     raise RuntimeError(
         'Could not locate the MMLOneSync plugin directory. Searched: '
@@ -42,6 +43,14 @@ def _resolve_plugin_dir() -> Path:
 
 
 HERE = _resolve_plugin_dir()
+# Production install ships mml_sync as a zip — Resolve doesn't show .zip files
+# in the Workspace > Scripts menu, so the helper modules don't pollute the menu
+# the way a `mml_sync/` directory would. zipimport mounts it transparently.
+# Dev install (running from the repo) still has the unzipped directory; both
+# work because we add HERE to sys.path too.
+ZIP_PATH = HERE / 'mml_sync.zip'
+if ZIP_PATH.is_file():
+    sys.path.insert(0, str(ZIP_PATH))
 sys.path.insert(0, str(HERE))
 
 from mml_sync import ui  # noqa: E402

@@ -22,6 +22,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pack mml_sync.zip
+        run: python3 installer/pack_plugin.py
       - name: Build .pkg
         run: |
           chmod +x installer/macos/build.sh
@@ -42,6 +44,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pack mml_sync.zip
+        shell: bash
+        run: python installer/pack_plugin.py
       - name: Install NSIS
         shell: pwsh
         run: |

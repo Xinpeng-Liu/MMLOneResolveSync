@@ -5,16 +5,63 @@ only updates labels via root.after(...). No mutable state shared without queues.
 """
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
 import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
 from . import api, config, diff, resolve_apply, storage
+
+
+def _ui_family() -> str:
+    if sys.platform.startswith('win'):
+        return 'Segoe UI'
+    if sys.platform.startswith('darwin'):
+        return 'Helvetica'
+    return 'DejaVu Sans'
+
+
+def _mono_family() -> str:
+    if sys.platform.startswith('win'):
+        return 'Consolas'
+    if sys.platform.startswith('darwin'):
+        return 'Menlo'
+    return 'DejaVu Sans Mono'
+
+
+def _font(size: int, weight: Optional[str] = None, mono: bool = False) -> tuple:
+    # Tk parses tuple-form font=('TkDefaultFont', N) as family='TkDefaultFont',
+    # not as the named font. On Windows that family lookup fails and Tk falls
+    # back to Times Roman 10pt. Use an explicit per-platform family instead.
+    family = _mono_family() if mono else _ui_family()
+    if weight:
+        return (family, size, weight)
+    return (family, size)
+
+
+def _apply_named_font_defaults() -> None:
+    # Belt-and-suspenders: retarget Tk's named fonts too so any widget that
+    # resolves them (menus, message boxes, ttk theme defaults) picks up the
+    # same family. Must be called after tk.Tk() — fonts don't exist before.
+    ui = _ui_family()
+    mono = _mono_family()
+    for name in (
+        'TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont',
+        'TkCaptionFont', 'TkSmallCaptionFont', 'TkIconFont', 'TkTooltipFont',
+    ):
+        try:
+            tkfont.nametofont(name).configure(family=ui)
+        except tk.TclError:
+            pass
+    try:
+        tkfont.nametofont('TkFixedFont').configure(family=mono)
+    except tk.TclError:
+        pass
 
 
 def _now_str() -> str:
@@ -69,7 +116,7 @@ class _Tooltip:
         tk.Label(
             tip, text=self.text,
             bg=self.BG, fg=self.FG,
-            font=('TkDefaultFont', 11),
+            font=_font(11),
             wraplength=self.wraplength,
             justify='left', padx=10, pady=6,
             bd=0, highlightthickness=0,
@@ -149,17 +196,17 @@ class App:
         # Push content to vertical center using a pair of expanding spacers.
         ttk.Frame(outer).pack(fill='both', expand=True)
 
-        glyph = ttk.Label(outer, text='🎬', font=('TkDefaultFont', 56))
+        glyph = ttk.Label(outer, text='🎬', font=_font(56))
         glyph.pack(pady=(0, 12))
 
         ttk.Label(
             outer, text='MML ONE Sync',
-            font=('TkDefaultFont', 22, 'bold'),
+            font=_font(22, 'bold'),
         ).pack()
 
         ttk.Label(
             outer, text='Connect MML ONE with DaVinci Resolve',
-            font=('TkDefaultFont', 13), foreground='#444',
+            font=_font(13), foreground='#444',
         ).pack(pady=(6, 18))
 
         ttk.Label(
@@ -168,7 +215,7 @@ class App:
                 'Generate a 6-digit code in MML ONE → Settings → '
                 'DaVinci Resolve sync, then click below to enter it.'
             ),
-            font=('TkDefaultFont', 11),
+            font=_font(11),
             foreground='#666',
             wraplength=380, justify='center',
         ).pack(pady=(0, 24))
@@ -187,12 +234,12 @@ class App:
         footer.pack(fill='x', pady=(16, 0))
         ttk.Label(
             footer, text="Don't have an account? ",
-            font=('TkDefaultFont', 10), foreground='#666',
+            font=_font(10), foreground='#666',
         ).pack(side='left', expand=True, anchor='e')
 
         link = ttk.Label(
             footer, text='Open MML ONE',
-            font=('TkDefaultFont', 10, 'underline'), foreground='#0a5fc4',
+            font=_font(10, 'underline'), foreground='#0a5fc4',
             cursor='hand2',
         )
         link.pack(side='left', expand=True, anchor='w')
@@ -217,7 +264,7 @@ class App:
 
         self.status_label = ttk.Label(
             header, textvariable=self.status_var,
-            font=('TkDefaultFont', 12, 'bold'),
+            font=_font(12, 'bold'),
         )
         self.status_label.pack(side='left')
 
@@ -239,12 +286,12 @@ class App:
         # ---- active target hint — primary signal when MML ONE pushes ----
         self.hint_kicker = ttk.Label(
             frm, textvariable=self.hint_kicker_var,
-            foreground='#0a7', font=('TkDefaultFont', 11),
+            foreground='#0a7', font=_font(11),
         )
         self.hint_kicker.pack(anchor='w', pady=(14, 0))
         self.hint_label = ttk.Label(
             frm, textvariable=self.hint_var,
-            foreground='#0a7', font=('TkDefaultFont', 14, 'bold'),
+            foreground='#0a7', font=_font(14, 'bold'),
         )
         self.hint_label.pack(anchor='w', pady=(2, 0))
 
@@ -317,14 +364,15 @@ class App:
 
         log_header = ttk.Frame(frm)
         log_header.pack(fill='x')
-        ttk.Label(log_header, text='Activity', font=('TkDefaultFont', 11, 'bold')).pack(side='left')
+        ttk.Label(log_header, text='Activity', font=_font(11, 'bold')).pack(side='left')
         clear_btn = ttk.Button(log_header, text='Clear', style='Toolbutton',
                                command=self._clear_log)
         clear_btn.pack(side='right')
         _attach_tooltip(clear_btn, 'Clear the activity log on this Mac. Does not affect Resolve or MML ONE.')
 
         self.log = tk.Text(frm, height=8, wrap='word', state='disabled',
-                           bg='#f7f7f7', borderwidth=1, relief='solid', padx=8, pady=6)
+                           bg='#f7f7f7', borderwidth=1, relief='solid', padx=8, pady=6,
+                           font=_font(10, mono=True))
         self.log.pack(fill='both', expand=True, pady=(6, 0))
 
         # ---- tooltips + hover cursor on every interactive control ----
@@ -423,7 +471,7 @@ class App:
         code_var = tk.StringVar()
         entry = ttk.Entry(
             win, textvariable=code_var, width=12, justify='center',
-            font=('TkFixedFont', 18),
+            font=_font(18, mono=True),
         )
         entry.pack(pady=4)
         entry.focus_set()
@@ -1039,5 +1087,6 @@ class App:
 
 def main(resolve_obj: Any) -> None:
     root = tk.Tk()
+    _apply_named_font_defaults()
     App(root, resolve_obj)
     root.mainloop()

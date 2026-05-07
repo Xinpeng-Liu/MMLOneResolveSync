@@ -9,7 +9,7 @@
 !include "FileFunc.nsh"
 
 !define APP_NAME       "MML ONE Resolve Sync"
-!define APP_VERSION    "0.1.0"
+!define APP_VERSION    "0.2.0"  ; keep in sync with mml_sync/__init__.py
 !define APP_PUBLISHER  "MML ONE"
 !define APP_ID         "MMLOneResolveSync"
 
@@ -27,7 +27,7 @@ InstallDir "$APPDATA\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Ed
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TEXT "${APP_NAME} is installed.$\r$\n$\r$\nNow open DaVinci Resolve and pick:$\r$\nWorkspace -> Scripts -> Edit -> MMLOneSync"
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} is installed.$\r$\n$\r$\nNow open DaVinci Resolve and pick:$\r$\nWorkspace -> Scripts -> MMLOneSync"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -35,8 +35,12 @@ InstallDir "$APPDATA\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Ed
 
 Section "Install" SecInstall
     SetOutPath "$INSTDIR"
+    ; Wipe leftover `mml_sync\` directory from <=v0.1 installs. Without this,
+    ; both the new mml_sync.zip and the old folder coexist and Resolve still
+    ; shows the stale "mml_sync" submenu next to MMLOneSync.
+    RMDir /r "$INSTDIR\mml_sync"
     File "..\..\MMLOneSync.py"
-    File /r /x __pycache__ "..\..\mml_sync"
+    File "..\..\mml_sync.zip"
     WriteUninstaller "$INSTDIR\uninstall-mmlonesync.exe"
     WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"     "${APP_NAME}"
     WriteRegStr   HKCU "${UNINST_KEY}" "DisplayVersion"  "${APP_VERSION}"
@@ -52,6 +56,8 @@ SectionEnd
 
 Section "Uninstall"
     Delete "$INSTDIR\MMLOneSync.py"
+    Delete "$INSTDIR\mml_sync.zip"
+    ; Belt-and-suspenders: also nuke any <=v0.1 leftover folder.
     RMDir /r "$INSTDIR\mml_sync"
     Delete "$INSTDIR\uninstall-mmlonesync.exe"
     DeleteRegKey HKCU "${UNINST_KEY}"

@@ -12,17 +12,29 @@ VERSION="$(grep -E "__version__" "$ROOT/mml_sync/__init__.py" | head -1 | cut -d
 echo "Building MML ONE Resolve Sync $VERSION (.pkg)"
 
 mkdir -p "$DIST_DIR"
+
+# Pack mml_sync into a zip so Resolve doesn't show it as a submenu
+# (Workspace > Scripts > Edit recurses into subdirectories; .zip is invisible
+# to that scanner, zipimport still mounts it at runtime).
+python3 "$ROOT/installer/pack_plugin.py"
+
 PAYLOAD="$STAGE/payload"
 mkdir -p "$PAYLOAD"
 cp "$ROOT/MMLOneSync.py" "$PAYLOAD/"
-cp -R "$ROOT/mml_sync" "$PAYLOAD/"
-find "$PAYLOAD" -name '__pycache__' -type d -exec rm -rf {} +
+cp "$ROOT/mml_sync.zip" "$PAYLOAD/"
 
+# Postinstall:
+#   1. Wipe leftover `mml_sync/` directory from <=v0.1 installs — without
+#      this, both the new mml_sync.zip and the old folder coexist and Resolve
+#      still shows the stale "mml_sync" submenu next to MMLOneSync.
+#   2. Strip quarantine xattr that macOS 15+ slaps on every file extracted
+#      from a downloaded archive — Resolve 20 ignores scripts that carry it.
 cat > "$SCRIPTS_DIR/postinstall" <<'POSTINSTALL'
 #!/bin/bash
 TARGET="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Edit"
+rm -rf "$TARGET/mml_sync" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$TARGET/MMLOneSync.py" 2>/dev/null || true
-xattr -dr com.apple.quarantine "$TARGET/mml_sync" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$TARGET/mml_sync.zip" 2>/dev/null || true
 exit 0
 POSTINSTALL
 chmod +x "$SCRIPTS_DIR/postinstall"
