@@ -1,0 +1,191 @@
+{
+  "prev": {
+    "schemaVersion": 1,
+    "projectId": "projF",
+    "projectName": "F",
+    "episodeId": "ep_fixture",
+    "episodeName": "Fixture",
+    "fps": 30,
+    "canvasWidth": 1920,
+    "canvasHeight": 1080,
+    "clips": [
+      {
+        "id": "scA",
+        "assetKey": "shot:shotA",
+        "trackId": "main",
+        "startTime": 0,
+        "duration": 3,
+        "trimStart": 0,
+        "trimEnd": 0,
+        "speed": 1,
+        "volume": 1,
+        "mediaUrl": "https://signed/A.mp4",
+        "mediaName": "",
+        "mediaMimeType": "video/mp4"
+      }
+    ],
+    "imageOverlays": [
+      {
+        "id": "imgX",
+        "kind": "image",
+        "assetKey": "media:sidI",
+        "startTime": 1,
+        "duration": 1,
+        "mediaUrl": "https://signed/p.png",
+        "mediaName": "p.png",
+        "mediaMimeType": "image/png",
+        "x": 0.5,
+        "y": 0.5,
+        "scaleX": 1,
+        "scaleY": 1,
+        "opacity": 1,
+        "rotation": 0
+      }
+    ],
+    "audioClips": [
+      {
+        "id": "audX",
+        "kind": "audio",
+        "assetKey": "media:sidA",
+        "startTime": 0,
+        "duration": 3,
+        "mediaUrl": "https://signed/m.mp3",
+        "mediaName": "m.mp3",
+        "mediaMimeType": "audio/mpeg",
+        "volume": 0.5
+      }
+    ],
+    "generatedAt": 1700000000000
+  },
+  "next": {
+    "schemaVersion": 1,
+    "projectId": "projF",
+    "projectName": "F",
+    "episodeId": "ep_fixture",
+    "episodeName": "Fixture",
+    "fps": 30,
+    "canvasWidth": 1920,
+    "canvasHeight": 1080,
+    "clips": [
+      {
+        "id": "scA",
+        "assetKey": "shot:shotA",
+        "trackId": "main",
+        "startTime": 0.5,
+        "duration": 3,
+        "trimStart": 0,
+        "trimEnd": 0,
+        "speed": 1,
+        "volume": 1,
+        "mediaUrl": "https://signed/A.mp4",
+        "mediaName": "",
+        "mediaMimeType": "video/mp4"
+      }
+    ],
+    "imageOverlays": [],
+    "audioClips": [
+      {
+        "id": "audX",
+        "kind": "audio",
+        "assetKey": "media:sidA",
+        "startTime": 0,
+        "duration": 3,
+        "mediaUrl": "https://signed/m.mp3",
+        "mediaName": "m.mp3",
+        "mediaMimeType": "audio/mpeg",
+        "volume": 0.5
+      },
+      {
+        "id": "audX2",
+        "kind": "audio",
+        "assetKey": "media:sidA2",
+        "startTime": 2,
+        "duration": 1,
+        "mediaUrl": "https://signed/m2.mp3",
+        "mediaName": "m2.mp3",
+        "mediaMimeType": "audio/mpeg",
+        "volume": 0.5
+      }
+    ],
+    "generatedAt": 1700000060000
+  },
+  "diff": {
+    "added": [
+      {
+        "category": "audio",
+        "id": "audX2",
+        "after": {
+          "id": "audX2",
+          "kind": "audio",
+          "assetKey": "media:sidA2",
+          "startTime": 2,
+          "duration": 1,
+          "mediaUrl": "https://signed/m2.mp3",
+          "mediaName": "m2.mp3",
+          "mediaMimeType": "audio/mpeg",
+          "volume": 0.5
+        }
+      }
+    ],
+    "modified": [
+      {
+        "category": "video",
+        "id": "scA",
+        "before": {
+          "id": "scA",
+          "assetKey": "shot:shotA",
+          "trackId": "main",
+          "startTime": 0,
+          "duration": 3,
+          "trimStart": 0,
+          "trimEnd": 0,
+          "speed": 1,
+          "volume": 1,
+          "mediaUrl": "https://signed/A.mp4",
+          "mediaName": "",
+          "mediaMimeType": "video/mp4"
+        },
+        "after": {
+          "id": "scA",
+          "assetKey": "shot:shotA",
+          "trackId": "main",
+          "startTime": 0.5,
+          "duration": 3,
+          "trimStart": 0,
+          "trimEnd": 0,
+          "speed": 1,
+          "volume": 1,
+          "mediaUrl": "https://signed/A.mp4",
+          "mediaName": "",
+          "mediaMimeType": "video/mp4"
+        },
+        "fieldChanges": [
+          "startTime"
+        ]
+      }
+    ],
+    "removed": [
+      {
+        "category": "image",
+        "id": "imgX",
+        "before": {
+          "id": "imgX",
+          "kind": "image",
+          "assetKey": "media:sidI",
+          "startTime": 1,
+          "duration": 1,
+          "mediaUrl": "https://signed/p.png",
+          "mediaName": "p.png",
+          "mediaMimeType": "image/png",
+          "x": 0.5,
+          "y": 0.5,
+          "scaleX": 1,
+          "scaleY": 1,
+          "opacity": 1,
+          "rotation": 0
+        }
+      }
+    ],
+    "unchanged": 1
+  }
+}
