@@ -6,11 +6,13 @@ from mml_sync import resolve_apply, storage
 from tests.fakes.resolve_api import FakeResolve, FakeProject
 
 
-def _state(clips, fps=30):
+def _state(clips, fps=30, video_tracks=None):
     return {
         'schemaVersion': 1, 'projectId': 'p1', 'episodeId': 'e1',
         'projectName': 'Demo', 'episodeName': 'Pilot',
         'fps': fps, 'canvasWidth': 1920, 'canvasHeight': 1080,
+        'videoTracks': video_tracks if video_tracks is not None
+        else [{'id': 'main', 'order': 0}],
         'clips': clips, 'imageOverlays': [], 'audioClips': [],
         'generatedAt': 0,
     }
@@ -221,6 +223,7 @@ class TestApplyOverlays(unittest.TestCase):
             'schemaVersion': 1, 'projectId': 'p1', 'episodeId': 'e1',
             'projectName': 'Demo', 'episodeName': 'Pilot',
             'fps': 30, 'canvasWidth': 1920, 'canvasHeight': 1080,
+            'videoTracks': [{'id': 'main', 'order': 0}],
             'clips': [], 'audioClips': [
                 {
                     'id': 'audX', 'kind': 'audio', 'assetKey': 'media:a',
@@ -255,6 +258,71 @@ class TestApplyOverlays(unittest.TestCase):
         self.assertEqual(result.added, 2)
         self.assertEqual(len(self.tl.GetItemListInTrack('video', 2)), 1)
         self.assertEqual(len(self.tl.GetItemListInTrack('audio', 1)), 1)
+
+
+class TestApplyMultiVideoTrack(unittest.TestCase):
+    """MML ONE video tracks map to distinct Resolve video tracks instead of
+    collapsing onto V1; image overlays sit one track above all of them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.project = FakeProject(name='UserProj', fps=30)
+        self.resolve = FakeResolve(self.project)
+        self.tl = self.project.GetMediaPool().CreateEmptyTimeline('MML ONE - Demo - Pilot')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_clips_land_on_their_own_tracks_and_image_sits_on_top(self):
+        clip_bottom = _clip('sc_b', start=0, dur=1, key='shot:b', track='main')
+        clip_top = _clip('sc_t', start=0, dur=1, key='shot:t', track='overlay')
+        state = _state(
+            [clip_bottom, clip_top],
+            video_tracks=[{'id': 'main', 'order': 0}, {'id': 'overlay', 'order': 1}],
+        )
+        state['imageOverlays'] = [{
+            'id': 'imgX', 'kind': 'image', 'assetKey': 'media:i',
+            'startTime': 0, 'duration': 1, 'mediaUrl': 'u', 'mediaName': 'p.png',
+            'mediaMimeType': 'image/png',
+            'x': 0.5, 'y': 0.5, 'scaleX': 1, 'scaleY': 1, 'opacity': 1, 'rotation': 0,
+        }]
+        diff = {
+            'added': [
+                {'category': 'video', 'id': 'sc_b', 'after': clip_bottom},
+                {'category': 'video', 'id': 'sc_t', 'after': clip_top},
+                {'category': 'image', 'id': 'imgX', 'after': state['imageOverlays'][0]},
+            ],
+            'modified': [], 'removed': [], 'unchanged': 0,
+        }
+        result = resolve_apply.apply_diff(
+            resolve=self.resolve, root=self.root,
+            project_id='p1', episode_id='e1',
+            timeline_name='MML ONE - Demo - Pilot',
+            current_state=state, diff=diff,
+            downloader=_writing_downloader,
+        )
+        self.assertEqual(result.added, 3)
+        # order 0 -> V1, order 1 -> V2, image one above -> V3.
+        self.assertEqual(len(self.tl.GetItemListInTrack('video', 1)), 1)
+        self.assertEqual(len(self.tl.GetItemListInTrack('video', 2)), 1)
+        self.assertEqual(len(self.tl.GetItemListInTrack('video', 3)), 1)
+
+    def test_unknown_track_id_falls_back_to_v1(self):
+        clip = _clip('sc_x', start=0, dur=1, track='ghost-track')
+        state = _state([clip], video_tracks=[{'id': 'main', 'order': 0}])
+        diff = {
+            'added': [{'category': 'video', 'id': 'sc_x', 'after': clip}],
+            'modified': [], 'removed': [], 'unchanged': 0,
+        }
+        resolve_apply.apply_diff(
+            resolve=self.resolve, root=self.root,
+            project_id='p1', episode_id='e1',
+            timeline_name='MML ONE - Demo - Pilot',
+            current_state=state, diff=diff,
+            downloader=_writing_downloader,
+        )
+        self.assertEqual(len(self.tl.GetItemListInTrack('video', 1)), 1)
 
 
 if __name__ == '__main__':

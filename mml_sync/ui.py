@@ -844,6 +844,7 @@ class App:
             'fps': like.get('fps', 30),
             'canvasWidth': like.get('canvasWidth', 1920),
             'canvasHeight': like.get('canvasHeight', 1080),
+            'videoTracks': like.get('videoTracks', []),
             'clips': [], 'imageOverlays': [], 'audioClips': [],
             'generatedAt': 0,
         }

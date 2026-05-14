@@ -8,6 +8,12 @@
     "fps": 30,
     "canvasWidth": 1920,
     "canvasHeight": 1080,
+    "videoTracks": [
+      {
+        "id": "main",
+        "order": 0
+      }
+    ],
     "clips": [
       {
         "id": "scA",
@@ -66,6 +72,12 @@
     "fps": 30,
     "canvasWidth": 1920,
     "canvasHeight": 1080,
+    "videoTracks": [
+      {
+        "id": "main",
+        "order": 0
+      }
+    ],
     "clips": [
       {
         "id": "scA",

@@ -105,6 +105,23 @@ def _seconds_to_frames(seconds: float, fps: float) -> int:
     return int(round(seconds * fps))
 
 
+def _video_track_index_map(current_state: Dict[str, Any]) -> Dict[str, int]:
+    """Map MML ONE video trackId -> Resolve video track index (1-based).
+
+    MML ONE `VideoTrack.order` is 0 at the bottom (the 'main' track); Resolve's
+    V1 is also the bottom track. Sorting by `order` ascending therefore maps the
+    bottom MML ONE track -> V1, the next -> V2, and so on. Clips whose trackId
+    isn't listed fall back to V1, mirroring buildSyncTimelineState which keeps
+    unknown-but-visible clips on the main track.
+
+    `videoTracks` is absent on snapshots produced before multi-track sync
+    shipped — an empty map then leaves every clip on V1 (the prior behaviour).
+    """
+    tracks = current_state.get('videoTracks') or []
+    ordered = sorted(tracks, key=lambda t: t.get('order', 0))
+    return {t['id']: i + 1 for i, t in enumerate(ordered) if t.get('id')}
+
+
 def _ext_for(clip: Dict[str, Any]) -> str:
     name = (clip.get('mediaName') or '').lower()
     if '.' in name:
@@ -112,38 +129,39 @@ def _ext_for(clip: Dict[str, Any]) -> str:
     return _EXT_BY_MIME.get(clip.get('mediaMimeType') or '', 'bin')
 
 
-def _ensure_timeline(project, timeline_name: str):
+def _ensure_timeline(project, timeline_name: str, min_video_tracks: int = 2):
     """Look up a timeline by name (Resolve has no GetTimelineByName, so we walk
     the index). Create it via MediaPool.CreateEmptyTimeline if absent.
 
-    On creation we also pre-allocate a second video track for image overlays
-    (which land on V2). Resolve's AppendToTimeline does NOT auto-create
-    missing tracks, so without this every image overlay would fail.
+    We also pre-allocate enough video tracks: one per MML ONE video track plus
+    one on top for image overlays. Resolve's AppendToTimeline does NOT
+    auto-create missing tracks, so without this any clip on a higher track
+    would fail to place.
     """
     count = int(project.GetTimelineCount() or 0)
     for i in range(1, count + 1):
         tl = project.GetTimelineByIndex(i)
         if tl is not None and tl.GetName() == timeline_name:
             project.SetCurrentTimeline(tl)
-            _ensure_minimum_tracks(tl)
+            _ensure_minimum_tracks(tl, min_video_tracks)
             return tl
     tl = project.GetMediaPool().CreateEmptyTimeline(timeline_name)
     if tl is None:
         raise TimelineNotFound(f'Resolve refused to create timeline {timeline_name!r}')
     project.SetCurrentTimeline(tl)
-    _ensure_minimum_tracks(tl)
+    _ensure_minimum_tracks(tl, min_video_tracks)
     return tl
 
 
-def _ensure_minimum_tracks(tl) -> None:
-    """Make sure the timeline has at least V2 (image overlays) and A1 (audio
-    overlays). Resolve creates new timelines with V1 + A1 by default, so we
-    only need to add V2."""
+def _ensure_minimum_tracks(tl, min_video_tracks: int = 2) -> None:
+    """Make sure the timeline has at least `min_video_tracks` video tracks (one
+    per MML ONE video track + one for image overlays) and A1 for audio. Resolve
+    creates new timelines with V1 + A1 by default, so we add the rest."""
     try:
         video_count = int(tl.GetTrackCount('video') or 0)
     except (AttributeError, TypeError):
         video_count = 0
-    while video_count < 2:
+    while video_count < min_video_tracks:
         added = tl.AddTrack('video') if hasattr(tl, 'AddTrack') else False
         if not added:
             break
@@ -440,7 +458,13 @@ def apply_diff(*,
             'Open a project that matches, or change the project fps.'
         )
 
-    tl = _ensure_timeline(project, timeline_name)
+    # MML ONE video tracks -> Resolve V1..Vn; image overlays sit one track
+    # above all of them so they composite on top.
+    track_index_map = _video_track_index_map(current_state)
+    video_track_count = max(len(track_index_map), 1)
+    image_track_index = video_track_count + 1
+
+    tl = _ensure_timeline(project, timeline_name, min_video_tracks=image_track_index)
     media_pool = project.GetMediaPool()
 
     mapping = storage.load_mapping(root, project_id, episode_id)
@@ -471,17 +495,20 @@ def apply_diff(*,
             storage.save_mapping(root, project_id, episode_id, mapping)
             continue
         if category == 'video':
-            # No mediaType → Resolve places video + audio together (V1 + A1),
-            # matching the user's manual drag-from-pool expectation.
+            # No mediaType → Resolve places video + audio together (Vn + A1),
+            # matching the user's manual drag-from-pool expectation. Track index
+            # comes from the clip's MML ONE trackId so multi-track timelines
+            # don't collapse onto V1.
             item = _append_clip_for_clip(media_pool, tl, media=media, clip=clip,
-                                         fps=expected_fps, track_index=1)
+                                         fps=expected_fps,
+                                         track_index=track_index_map.get(clip.get('trackId'), 1))
         elif category == 'image':
-            # Image overlays land on V2 above the main video so they composite on top.
-            # Per-image transform (x/y/scale/rotation/opacity) cannot be set via the
-            # scripting API on free or Studio — the editor adjusts in Inspector.
+            # Image overlays land one track above all video so they composite on
+            # top. Per-image transform (x/y/scale/rotation/opacity) cannot be set
+            # via the scripting API on free or Studio — the editor adjusts in Inspector.
             item = _append_overlay(media_pool, tl, media=media, overlay=clip,
                                    fps=expected_fps,
-                                   track_index=2, media_type=_MEDIA_TYPE_VIDEO)
+                                   track_index=image_track_index, media_type=_MEDIA_TYPE_VIDEO)
         elif category == 'audio':
             item = _append_overlay(media_pool, tl, media=media, overlay=clip,
                                    fps=expected_fps,
@@ -528,11 +555,12 @@ def apply_diff(*,
 
         if category == 'video':
             new_item = _append_clip_for_clip(media_pool, tl, media=media, clip=clip,
-                                             fps=expected_fps, track_index=1)
+                                             fps=expected_fps,
+                                             track_index=track_index_map.get(clip.get('trackId'), 1))
         elif category == 'image':
             new_item = _append_overlay(media_pool, tl, media=media, overlay=clip,
                                        fps=expected_fps,
-                                       track_index=2, media_type=_MEDIA_TYPE_VIDEO)
+                                       track_index=image_track_index, media_type=_MEDIA_TYPE_VIDEO)
         elif category == 'audio':
             new_item = _append_overlay(media_pool, tl, media=media, overlay=clip,
                                        fps=expected_fps,
