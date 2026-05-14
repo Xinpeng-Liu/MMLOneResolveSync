@@ -6,7 +6,10 @@ name: Build Resolve plugin installers
 #   - manual workflow_dispatch (smoke-build for testing)
 #
 # Outputs are uploaded as workflow artifacts. On a tag push they are also
-# attached to the corresponding GitHub Release.
+# attached to the corresponding GitHub Release. Installer filenames carry
+# the plugin version (e.g. MMLOneResolveSync-v0.2.1.pkg) so a downloaded
+# file is self-identifying — server/installers.ts in the web app derives
+# the same versioned name from RESOLVE_PLUGIN_RELEASE_TAG.
 
 on:
   push:
@@ -28,17 +31,25 @@ jobs:
         run: |
           chmod +x installer/macos/build.sh
           ./installer/macos/build.sh
+      - name: Stamp version into filename
+        id: artifact
+        run: |
+          VERSION=$(grep -E "__version__" mml_sync/__init__.py | head -1 | cut -d "'" -f 2)
+          [ -n "$VERSION" ] || { echo "could not read plugin version"; exit 1; }
+          DST="dist/macos/MMLOneResolveSync-v${VERSION}.pkg"
+          mv dist/macos/MMLOneResolveSync.pkg "$DST"
+          echo "path=$DST" >> "$GITHUB_OUTPUT"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: MMLOneResolveSync-macos
-          path: dist/macos/MMLOneResolveSync.pkg
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/resolve-plugin-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/macos/MMLOneResolveSync.pkg
+          files: ${{ steps.artifact.outputs.path }}
 
   windows:
     runs-on: windows-latest
@@ -61,14 +72,23 @@ jobs:
           mkdir dist\windows
           cd installer\windows
           makensis installer.nsi
+      - name: Stamp version into filename
+        id: artifact
+        shell: bash
+        run: |
+          VERSION=$(grep -E "__version__" mml_sync/__init__.py | head -1 | cut -d "'" -f 2)
+          [ -n "$VERSION" ] || { echo "could not read plugin version"; exit 1; }
+          DST="dist/windows/MMLOneResolveSync-Setup-v${VERSION}.exe"
+          mv dist/windows/MMLOneResolveSync-Setup.exe "$DST"
+          echo "path=$DST" >> "$GITHUB_OUTPUT"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: MMLOneResolveSync-windows
-          path: dist/windows/MMLOneResolveSync-Setup.exe
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/resolve-plugin-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/windows/MMLOneResolveSync-Setup.exe
+          files: ${{ steps.artifact.outputs.path }}
