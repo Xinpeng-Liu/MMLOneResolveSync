@@ -7,7 +7,7 @@ SYNC_SCHEMA_VERSION = 1
 
 # Edit before shipping a build to point at your prod Convex deployment.
 # Override via the MMLONE_API_BASE_URL env var (set by the user before launching Resolve).
-DEFAULT_API_BASE_URL = 'https://healthy-horse-309.convex.site'
+DEFAULT_API_BASE_URL = 'https://beaming-pony-705.convex.site'
 
 # Connection + read timeouts in seconds for HTTP calls.
 HTTP_CONNECT_TIMEOUT = 10

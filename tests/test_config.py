@@ -10,8 +10,8 @@ class TestConfig(unittest.TestCase):
     def test_schema_version_matches_typescript(self):
         self.assertEqual(config.SYNC_SCHEMA_VERSION, 1)
 
-    def test_default_base_url_uses_https(self):
-        self.assertTrue(config.DEFAULT_API_BASE_URL.startswith('https://'))
+    def test_default_base_url_points_at_production_convex_site(self):
+        self.assertEqual(config.DEFAULT_API_BASE_URL, 'https://beaming-pony-705.convex.site')
 
     def test_user_data_dir_is_per_user_and_under_home(self):
         with mock.patch.dict(os.environ, {'HOME': '/tmp/fake-home'}, clear=False):
