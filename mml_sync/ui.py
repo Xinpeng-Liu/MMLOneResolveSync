@@ -100,7 +100,7 @@ class App:
     def _show_welcome(self) -> None:
         self._clear_container()
         # Centered column: glyph + title + 1-line description + Pair button +
-        # link out to mml.one. Native ttk widgets, no theming.
+        # link out to the web app. Native ttk widgets, no theming.
         outer = ttk.Frame(self._container, padding=(32, 40, 32, 24))
         outer.pack(fill='both', expand=True)
 
@@ -158,9 +158,8 @@ class App:
         _attach_tooltip(link, 'Open the MML ONE web app in your browser.')
 
     def _mml_one_web_url(self) -> str:
-        # Best-effort: api_base ends in convex.site, the public web app is the
-        # mirror domain. Fall back to a hard-coded URL.
-        return 'https://mml.one'
+        # The production web app. (mml.one is a dead domain — don't link it.)
+        return 'https://mmlone.com'
 
     # ---- main screen (paired) ----
 

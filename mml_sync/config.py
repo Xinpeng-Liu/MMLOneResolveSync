@@ -7,7 +7,7 @@ SYNC_SCHEMA_VERSION = 1
 
 # Single source of truth for the plugin version. __init__.__version__ and
 # api.USER_AGENT both derive from this.
-PLUGIN_VERSION = '0.3.0'
+PLUGIN_VERSION = '0.3.1'
 
 # Edit before shipping a build to point at your prod Convex deployment.
 # Override via the MMLONE_API_BASE_URL env var (set by the user before launching Resolve).

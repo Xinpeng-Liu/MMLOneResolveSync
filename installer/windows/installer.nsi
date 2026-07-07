@@ -9,7 +9,7 @@
 !include "FileFunc.nsh"
 
 !define APP_NAME       "MML ONE Resolve Sync"
-!define APP_VERSION    "0.3.0"  ; keep in sync with mml_sync/config.py PLUGIN_VERSION
+!define APP_VERSION    "0.3.1"  ; keep in sync with mml_sync/config.py PLUGIN_VERSION
 !define APP_PUBLISHER  "MML ONE"
 !define APP_ID         "MMLOneResolveSync"
 

@@ -12,7 +12,8 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.SYNC_SCHEMA_VERSION, 1)
 
     def test_package_version_derives_from_config(self):
-        self.assertEqual(config.PLUGIN_VERSION, '0.3.0')
+        # Format-pinned, not value-pinned: version bumps must not touch tests.
+        self.assertRegex(config.PLUGIN_VERSION, r'^\d+\.\d+\.\d+$')
         self.assertEqual(mml_sync.__version__, config.PLUGIN_VERSION)
 
     def test_connect_timeout_constant_removed(self):
