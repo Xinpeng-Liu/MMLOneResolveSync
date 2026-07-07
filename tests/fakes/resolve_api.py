@@ -42,6 +42,10 @@ class FakeTimelineItem:
         self._record_start = record_start
         self._color: Optional[str] = None
         self._markers: List[Dict[str, Any]] = []
+        self._properties: Dict[str, Any] = {}
+        # Real Resolve builds differ on which item properties are scriptable;
+        # tests flip this to simulate SetProperty rejecting the write.
+        self._set_property_supported = True
 
     def GetUniqueId(self) -> str:
         return self._unique_id
@@ -49,6 +53,15 @@ class FakeTimelineItem:
     def SetClipColor(self, name: str) -> bool:
         self._color = name
         return True
+
+    def SetProperty(self, key: str, value: Any) -> bool:
+        if not self._set_property_supported:
+            return False
+        self._properties[key] = value
+        return True
+
+    def GetProperty(self, key: str) -> Any:
+        return self._properties.get(key)
 
     def AddMarker(self, frame: int, color: str, name: str, note: str,
                   duration: int, custom_data: str = '') -> bool:
@@ -74,6 +87,10 @@ class FakeTimeline:
         # Real Resolve timelines start at 01:00:00:00 (3600 seconds * fps).
         # Mirror that so tests catch off-by-startFrame mistakes.
         self._start_frame = int(round(fps * 3600))
+        self._settings: Dict[str, str] = {'timelineFrameRate': str(fps)}
+        # Real Resolve rejects per-timeline settings on some builds/timelines;
+        # tests flip this to simulate SetSetting returning False.
+        self._refuse_set_setting = False
 
     def GetName(self) -> str:
         return self._name
@@ -82,9 +99,18 @@ class FakeTimeline:
         return self._start_frame
 
     def GetSetting(self, key: str) -> str:
+        return self._settings.get(key, '')
+
+    def SetSetting(self, key: str, value: str) -> bool:
+        if self._refuse_set_setting:
+            return False
+        self._settings[key] = value
         if key == 'timelineFrameRate':
-            return str(self._fps)
-        return ''
+            try:
+                self._fps = float(value)
+            except ValueError:
+                pass
+        return True
 
     def GetItemListInTrack(self, kind: str, index: int) -> List[FakeTimelineItem]:
         # Real Resolve indexes tracks 1..N; we route index>1 to a "{kind}-{index}" bucket.
@@ -120,28 +146,62 @@ class FakeTimeline:
         return True
 
 
+class FakeFolder:
+    def __init__(self, name: str):
+        self._name = name
+        self._subfolders: List['FakeFolder'] = []
+        self._clips: List[FakeMediaPoolItem] = []
+
+    def GetName(self) -> str:
+        return self._name
+
+    def GetSubFolderList(self) -> List['FakeFolder']:
+        return list(self._subfolders)
+
+    def GetClipList(self) -> List[FakeMediaPoolItem]:
+        return list(self._clips)
+
+
 class FakeMediaPool:
     """Mirrors the production code path:
-    - `ImportMedia([path])` → list of MediaPoolItem
+    - `ImportMedia([path])` → list of MediaPoolItem (into the current folder)
     - `CreateEmptyTimeline(name)` → Timeline (real Resolve method on MediaPool)
     - `AppendToTimeline([{mediaPoolItem, startFrame, endFrame, recordFrame, trackIndex, mediaType}])`
+    - `GetRootFolder()` / `AddSubFolder(parent, name)` / `SetCurrentFolder(folder)`
     """
 
     def __init__(self):
         self._next_media = 0
         self._project: Optional['FakeProject'] = None  # set by FakeProject.__init__
+        self._root_folder = FakeFolder('Master')
+        self._current_folder = self._root_folder
 
     def ImportMedia(self, paths: List[str]) -> List[FakeMediaPoolItem]:
         out: List[FakeMediaPoolItem] = []
         for p in paths:
             self._next_media += 1
-            out.append(FakeMediaPoolItem(p, f'mp_{self._next_media}'))
+            item = FakeMediaPoolItem(p, f'mp_{self._next_media}')
+            self._current_folder._clips.append(item)
+            out.append(item)
         return out
+
+    def GetRootFolder(self) -> FakeFolder:
+        return self._root_folder
+
+    def AddSubFolder(self, parent: FakeFolder, name: str) -> FakeFolder:
+        folder = FakeFolder(name)
+        parent._subfolders.append(folder)
+        return folder
+
+    def SetCurrentFolder(self, folder: FakeFolder) -> bool:
+        self._current_folder = folder
+        return True
 
     def CreateEmptyTimeline(self, name: str) -> FakeTimeline:
         if self._project is None:
             raise RuntimeError('FakeMediaPool not bound to a project')
         t = FakeTimeline(name, self._project._fps)
+        t._refuse_set_setting = self._project.refuse_timeline_set_setting
         self._project._timelines.append(t)
         self._project._current = t
         return t
@@ -180,6 +240,10 @@ class FakeProject:
         self._media_pool._project = self
         self._fps = fps
         self._settings: Dict[str, str] = {'timelineFrameRate': str(fps)}
+        # Tests flip this so timelines created via CreateEmptyTimeline refuse
+        # per-timeline SetSetting, simulating Resolve builds without custom
+        # timeline settings.
+        self.refuse_timeline_set_setting = False
 
     def GetName(self) -> str:
         return self._name

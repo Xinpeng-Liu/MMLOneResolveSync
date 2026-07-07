@@ -3,12 +3,21 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import mml_sync
 from mml_sync import config
 
 
 class TestConfig(unittest.TestCase):
     def test_schema_version_matches_typescript(self):
         self.assertEqual(config.SYNC_SCHEMA_VERSION, 1)
+
+    def test_package_version_derives_from_config(self):
+        self.assertEqual(config.PLUGIN_VERSION, '0.3.0')
+        self.assertEqual(mml_sync.__version__, config.PLUGIN_VERSION)
+
+    def test_connect_timeout_constant_removed(self):
+        # urllib's urlopen takes a single timeout; the split constant is gone.
+        self.assertFalse(hasattr(config, 'HTTP_CONNECT_TIMEOUT'))
 
     def test_default_base_url_points_at_production_convex_site(self):
         self.assertEqual(config.DEFAULT_API_BASE_URL, 'https://beaming-pony-705.convex.site')

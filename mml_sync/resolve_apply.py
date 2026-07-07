@@ -6,7 +6,7 @@ with `GetCurrentProject()`. The fake in tests is duck-compatible with the real
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from . import config, storage
 
@@ -30,6 +30,31 @@ class ApplyResult:
 
 _MEDIA_TYPE_VIDEO = 1
 _MEDIA_TYPE_AUDIO = 2
+
+# Field sets that can be applied to an existing TimelineItem in place. A
+# delete+re-add for these would destroy the editor's grade/effects while the
+# re-added clip STILL wouldn't carry them — AppendToTimeline's clipInfo has
+# no transform or volume fields.
+_IMAGE_TRANSFORM_FIELDS = {'x', 'y', 'scaleX', 'scaleY', 'opacity', 'rotation'}
+_VOLUME_FIELDS = {'volume'}
+
+
+def modification_needs_media(change: Dict[str, Any]) -> bool:
+    """Whether a modified diff entry will download/re-apply media, or be
+    handled in place on the existing TimelineItem. The prefetch step uses
+    this to skip media the apply loop never reads — a volume-only change on a
+    video clip must not pull the whole source file. Transform-only image
+    changes CAN still fall back to a re-apply when the tracked item vanished;
+    that rare path self-heals with an inline download."""
+    changed = set(change.get('fieldChanges') or [])
+    if not changed:
+        return True
+    category = change.get('category')
+    if category == 'image' and changed <= _IMAGE_TRANSFORM_FIELDS:
+        return False
+    if category in ('video', 'audio') and changed == _VOLUME_FIELDS:
+        return False
+    return True
 
 _EXT_BY_MIME = {
     'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm',
@@ -129,7 +154,8 @@ def _ext_for(clip: Dict[str, Any]) -> str:
     return _EXT_BY_MIME.get(clip.get('mediaMimeType') or '', 'bin')
 
 
-def _ensure_timeline(project, timeline_name: str, min_video_tracks: int = 2):
+def _ensure_timeline(project, timeline_name: str, min_video_tracks: int = 2,
+                     expected_fps: Optional[float] = None):
     """Look up a timeline by name (Resolve has no GetTimelineByName, so we walk
     the index). Create it via MediaPool.CreateEmptyTimeline if absent.
 
@@ -137,6 +163,12 @@ def _ensure_timeline(project, timeline_name: str, min_video_tracks: int = 2):
     one on top for image overlays. Resolve's AppendToTimeline does NOT
     auto-create missing tracks, so without this any clip on a higher track
     would fail to place.
+
+    A fresh timeline inherits the project frame rate. When `expected_fps`
+    disagrees with it we try to flip the new timeline to a per-timeline custom
+    frame rate — only possible while the timeline is still empty, and only on
+    Resolve builds that expose timeline settings, hence best-effort. The
+    caller re-reads the effective rate and decides whether to abort.
     """
     count = int(project.GetTimelineCount() or 0)
     for i in range(1, count + 1):
@@ -148,9 +180,32 @@ def _ensure_timeline(project, timeline_name: str, min_video_tracks: int = 2):
     tl = project.GetMediaPool().CreateEmptyTimeline(timeline_name)
     if tl is None:
         raise TimelineNotFound(f'Resolve refused to create timeline {timeline_name!r}')
+    if expected_fps is not None:
+        try:
+            project_fps = float(project.GetSetting('timelineFrameRate') or expected_fps)
+        except (TypeError, ValueError):
+            project_fps = expected_fps
+        if abs(project_fps - expected_fps) > 0.01:
+            _try_set_timeline_fps(tl, expected_fps)
     project.SetCurrentTimeline(tl)
     _ensure_minimum_tracks(tl, min_video_tracks)
     return tl
+
+
+def _try_set_timeline_fps(tl, fps: float) -> bool:
+    """Flip a (new, empty) timeline to a custom frame rate. Resolve requires
+    useCustomSettings before timelineFrameRate takes; both return False on
+    builds/timelines that don't allow it, and older builds lack SetSetting
+    entirely."""
+    if not hasattr(tl, 'SetSetting'):
+        return False
+    fps_str = f'{fps:g}'
+    try:
+        if not tl.SetSetting('useCustomSettings', '1'):
+            return False
+        return bool(tl.SetSetting('timelineFrameRate', fps_str))
+    except Exception:
+        return False
 
 
 def _ensure_minimum_tracks(tl, min_video_tracks: int = 2) -> None:
@@ -223,7 +278,13 @@ def _append_clip_for_clip(media_pool, tl, *, media, clip: Dict[str, Any], fps: f
     """Translate a SyncClip's seconds-based timing into Resolve frame fields.
     `media_type=None` lets Resolve place both video AND audio (matches the
     manual drag-from-pool behaviour). Callers should leave it None for full
-    A/V clips."""
+    A/V clips.
+
+    The source range is trimStart .. trimStart+duration regardless of clip
+    speed: retime is not scriptable, so timeline LAYOUT correctness (the item
+    occupies exactly `duration` on the timeline) is chosen over source-span
+    correctness for speed≠1 clips — those get flagged via
+    _flag_speed_mismatch for a manual retime."""
     source_start = _seconds_to_frames(clip['trimStart'], fps)
     source_end = _seconds_to_frames(clip['trimStart'] + clip['duration'], fps)
     record_frame = _seconds_to_frames(clip['startTime'], fps) + _timeline_start_frame(tl)
@@ -248,17 +309,125 @@ def _append_overlay(media_pool, tl, *, media, overlay: Dict[str, Any], fps: floa
 
 
 def _find_timeline_item(tl, unique_id: str):
-    """Scan every track on the timeline for a TimelineItem with the given id."""
+    """Scan every track on the timeline for a TimelineItem with the given id.
+    GetItemListInTrack returns None (not []) on some Resolve builds/track
+    indices, hence the `or []`."""
     for kind in ('video', 'audio'):
         try:
             count = int(tl.GetTrackCount(kind))
         except (AttributeError, TypeError):
             count = 16
         for idx in range(1, max(count, 1) + 1):
-            for it in tl.GetItemListInTrack(kind, idx):
+            for it in (tl.GetItemListInTrack(kind, idx) or []):
                 if it.GetUniqueId() == unique_id:
                     return it
     return None
+
+
+def _collect_timeline_item_ids(tl) -> set:
+    """One pass over every video+audio track collecting each item's unique id.
+    Membership checks against many tracked ids must use this instead of
+    per-id _find_timeline_item — each of those is a full timeline walk of
+    Resolve API round-trips."""
+    ids: set = set()
+    for kind in ('video', 'audio'):
+        try:
+            count = int(tl.GetTrackCount(kind))
+        except (AttributeError, TypeError):
+            count = 16
+        for idx in range(1, max(count, 1) + 1):
+            for it in (tl.GetItemListInTrack(kind, idx) or []):
+                try:
+                    ids.add(it.GetUniqueId())
+                except (AttributeError, TypeError):
+                    pass
+    return ids
+
+
+def _apply_transform(item, overlay: Dict[str, Any], canvas_w: float, canvas_h: float) -> bool:
+    """Map an MML ONE overlay transform onto Resolve TimelineItem properties.
+
+    Coordinate semantics mirror the FCPXML adapter
+    (services/clip-composer/export/nle/adapters/fcpxml.ts, which targets
+    "DaVinci Resolve 18+" and Resolve imports correctly):
+      - MML x/y are the element CENTER as a canvas fraction, origin top-left,
+        y growing DOWN (render-geometry.ts: centerX = x * canvasW,
+        centerY = y * canvasH).
+      - Resolve Pan/Tilt are pixel offsets from frame center with y growing
+        UP (Inspector Position Y increases upward — the same convention the
+        FCPXML `position` attribute encodes as py = (0.5 - y) * 100), hence
+        Pan = (x - 0.5) * w and Tilt = (0.5 - y) * h.
+      - scaleX/scaleY → ZoomX/ZoomY. For images MML scales relative to canvas
+        width while Resolve zooms the fit-to-frame size; exact equivalence
+        needs the media's natural size, which the sync state doesn't carry.
+        The FCPXML adapter ships the same approximation.
+      - rotation (degrees) → RotationAngle, passed through unchanged, again
+        matching the FCPXML adapter.
+      - opacity is 0..1 in MML (render-geometry multiplies alpha by it);
+        Resolve Opacity is 0..100.
+    Only fields present on the overlay are written. Returns True only when
+    every attempted property was accepted.
+    """
+    if not hasattr(item, 'SetProperty'):
+        return False
+    props: Dict[str, float] = {}
+    if overlay.get('x') is not None:
+        props['Pan'] = (float(overlay['x']) - 0.5) * canvas_w
+    if overlay.get('y') is not None:
+        props['Tilt'] = (0.5 - float(overlay['y'])) * canvas_h
+    if overlay.get('scaleX') is not None:
+        props['ZoomX'] = float(overlay['scaleX'])
+    if overlay.get('scaleY') is not None:
+        props['ZoomY'] = float(overlay['scaleY'])
+    if overlay.get('rotation') is not None:
+        props['RotationAngle'] = float(overlay['rotation'])
+    if overlay.get('opacity') is not None:
+        props['Opacity'] = float(overlay['opacity']) * 100.0
+    ok = True
+    for key, value in props.items():
+        try:
+            if not item.SetProperty(key, value):
+                ok = False
+        except Exception:
+            ok = False
+    return ok
+
+
+def _set_item_volume(item, volume) -> bool:
+    """'Volume' as a scriptable TimelineItem property is not documented for
+    every Resolve release — anything but an explicit truthy return counts as
+    unsupported so the caller can warn instead of silently claiming success."""
+    if volume is None or not hasattr(item, 'SetProperty'):
+        return False
+    try:
+        return bool(item.SetProperty('Volume', float(volume)))
+    except Exception:
+        return False
+
+
+def _flag_speed_mismatch(item, clip: Dict[str, Any], result: ApplyResult) -> None:
+    """Retime cannot be set via the scripting API, so a speed≠1 clip lands at
+    1x with correct timeline layout but the wrong playback rate. Mark it so
+    the editor retimes by hand instead of discovering it in review."""
+    try:
+        speed = float(clip.get('speed', 1) or 1)
+    except (TypeError, ValueError):
+        return
+    if abs(speed - 1.0) <= 1e-6:
+        return
+    try:
+        item.AddMarker(
+            frame=item.GetStart(), color='Blue',
+            name='MML ONE: speed',
+            note=f'Speed {speed:g}x in MML ONE — set retime manually in Resolve.',
+            duration=1, custom_data='mml_one_speed',
+        )
+    except Exception:
+        pass
+    result.warnings.append(
+        f'{clip.get("id", "clip")} plays at {speed:g}x in MML ONE — retime is not '
+        'scriptable; set it manually in Resolve.'
+    )
 
 
 def import_media_only(*, resolve: Any, root: Path, project_id: str,
@@ -276,6 +445,28 @@ def import_media_only(*, resolve: Any, root: Path, project_id: str,
     if project is None:
         raise TimelineNotFound('No project open in Resolve')
     media_pool = project.GetMediaPool()
+
+    # Land the imports in an 'MML ONE' bin so they don't scatter across the
+    # editor's own media-pool organisation. Folder APIs vary across Resolve
+    # builds, so every step is optional — any failure keeps the current folder.
+    try:
+        if hasattr(media_pool, 'GetRootFolder'):
+            root_folder = media_pool.GetRootFolder()
+            folder = None
+            if root_folder is not None and hasattr(root_folder, 'GetSubFolderList'):
+                for sub in (root_folder.GetSubFolderList() or []):
+                    try:
+                        if sub.GetName() == 'MML ONE':
+                            folder = sub
+                            break
+                    except (AttributeError, TypeError):
+                        pass
+            if folder is None and root_folder is not None and hasattr(media_pool, 'AddSubFolder'):
+                folder = media_pool.AddSubFolder(root_folder, 'MML ONE')
+            if folder and hasattr(media_pool, 'SetCurrentFolder'):
+                media_pool.SetCurrentFolder(folder)
+    except Exception:
+        pass
 
     mapping = storage.load_mapping(root, project_id, episode_id)
     cache = config.media_cache_dir(root, project_id)
@@ -342,13 +533,14 @@ def reconcile_drift(*, resolve: Any, root: Path, project_id: str,
     if not tracked:
         return snapshot
 
-    missing_ids = set()
-    for clip_id, ti_id in tracked.items():
-        if tl is None:
-            missing_ids.add(clip_id)
-            continue
-        if _find_timeline_item(tl, ti_id) is None:
-            missing_ids.add(clip_id)
+    if tl is None:
+        missing_ids = set(tracked)
+    else:
+        # Single timeline walk instead of one _find_timeline_item scan per
+        # tracked id — the latter is O(tracked × tracks × items) Resolve API
+        # round-trips.
+        present = _collect_timeline_item_ids(tl)
+        missing_ids = {cid for cid, ti_id in tracked.items() if ti_id not in present}
 
     if not missing_ids:
         return snapshot
@@ -452,11 +644,6 @@ def apply_diff(*,
 
     expected_fps = float(current_state['fps'])
     project_fps = float(project.GetSetting('timelineFrameRate') or expected_fps)
-    if abs(project_fps - expected_fps) > 0.01:
-        raise FrameRateMismatch(
-            f'Resolve project is {project_fps} fps; MML ONE timeline is {expected_fps} fps. '
-            'Open a project that matches, or change the project fps.'
-        )
 
     # MML ONE video tracks -> Resolve V1..Vn; image overlays sit one track
     # above all of them so they composite on top.
@@ -464,8 +651,34 @@ def apply_diff(*,
     video_track_count = max(len(track_index_map), 1)
     image_track_index = video_track_count + 1
 
-    tl = _ensure_timeline(project, timeline_name, min_video_tracks=image_track_index)
+    tl = _ensure_timeline(project, timeline_name, min_video_tracks=image_track_index,
+                          expected_fps=expected_fps)
+
+    # The fps guard runs AFTER _ensure_timeline: a freshly created timeline
+    # can be flipped to a per-timeline custom frame rate, which the project
+    # setting alone can't express. Aborting here leaves at worst an empty
+    # timeline behind — harmless, unlike clips placed at the wrong rate.
+    effective_fps = project_fps
+    try:
+        raw = tl.GetSetting('timelineFrameRate') if hasattr(tl, 'GetSetting') else ''
+        if raw:
+            effective_fps = float(raw)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if abs(effective_fps - expected_fps) > 0.01:
+        raise FrameRateMismatch(
+            f'Resolve timeline is {effective_fps:g} fps; MML ONE timeline is '
+            f'{expected_fps:g} fps, and setting a custom timeline frame rate '
+            'failed. Open or create a Resolve project whose frame rate matches '
+            'the MML ONE timeline.'
+        )
     media_pool = project.GetMediaPool()
+
+    # Pan/Tilt are pixel offsets in timeline space; the transform math assumes
+    # the Resolve timeline resolution equals the MML ONE canvas. A mismatch
+    # shifts overlays proportionally — acceptable while both default 1920x1080.
+    canvas_w = float(current_state.get('canvasWidth') or 1920)
+    canvas_h = float(current_state.get('canvasHeight') or 1080)
 
     mapping = storage.load_mapping(root, project_id, episode_id)
     mapping['resolveProjectName'] = project.GetName()
@@ -476,9 +689,21 @@ def apply_diff(*,
     result = ApplyResult()
 
     # ---- added ----
+    preexisting_ids: Optional[set] = None
     for change in diff['added']:
         category = change['category']
         clip = change['after']
+        # Retry after a partial failure re-sends already-placed clips as
+        # added (ui.py only advances the snapshot when skipped == 0). A clip
+        # whose mapped TimelineItem is still on the timeline is done: no
+        # download, no append, and NOT counted as skipped — an already-applied
+        # item must not block the snapshot from advancing.
+        mapped_ti = mapping['clipIdToTimelineItemId'].get(clip['id'])
+        if mapped_ti:
+            if preexisting_ids is None:
+                preexisting_ids = _collect_timeline_item_ids(tl)
+            if mapped_ti in preexisting_ids:
+                continue
         local = cache / f'{clip["assetKey"].replace(":", "_")}.{_ext_for(clip)}'
         try:
             downloader(clip['mediaUrl'], local)
@@ -503,9 +728,9 @@ def apply_diff(*,
                                          fps=expected_fps,
                                          track_index=track_index_map.get(clip.get('trackId'), 1))
         elif category == 'image':
-            # Image overlays land one track above all video so they composite on
-            # top. Per-image transform (x/y/scale/rotation/opacity) cannot be set
-            # via the scripting API on free or Studio — the editor adjusts in Inspector.
+            # Image overlays land one track above all video so they composite
+            # on top. Transform is pushed onto the item afterwards via
+            # SetProperty — AppendToTimeline's clipInfo has no transform fields.
             item = _append_overlay(media_pool, tl, media=media, overlay=clip,
                                    fps=expected_fps,
                                    track_index=image_track_index, media_type=_MEDIA_TYPE_VIDEO)
@@ -521,6 +746,13 @@ def apply_diff(*,
             result.skipped += 1
             storage.save_mapping(root, project_id, episode_id, mapping)
             continue
+        if category == 'image':
+            if not _apply_transform(item, clip, canvas_w, canvas_h):
+                result.warnings.append(
+                    f'Could not auto-apply transform for {clip["id"]} — adjust in Inspector'
+                )
+        elif category == 'video':
+            _flag_speed_mismatch(item, clip, result)
         mapping['clipIdToTimelineItemId'][clip['id']] = item.GetUniqueId()
         result.added += 1
         storage.save_mapping(root, project_id, episode_id, mapping)
@@ -532,6 +764,49 @@ def apply_diff(*,
         category = change['category']
         clip = change['after']
         ti_id = mapping['clipIdToTimelineItemId'].get(change['id'])
+        changed = set(change.get('fieldChanges') or [])
+
+        # Transform-only image changes are applied to the existing item in
+        # place. Either way the change counts as modified — skipped would
+        # block the snapshot from advancing and re-present the same transform
+        # on every sync. A vanished item falls through to the re-apply path.
+        if category == 'image' and changed and changed <= _IMAGE_TRANSFORM_FIELDS:
+            existing = _find_timeline_item(tl, ti_id) if ti_id else None
+            if existing is not None:
+                if _apply_transform(existing, clip, canvas_w, canvas_h):
+                    existing.AddMarker(
+                        frame=existing.GetStart(), color='Yellow',
+                        name='MML ONE: transform updated',
+                        note='fields: ' + ', '.join(sorted(changed)),
+                        duration=1, custom_data='mml_one_transform',
+                    )
+                else:
+                    result.warnings.append(
+                        f'Transform for {change["id"]} changed in MML ONE but could not '
+                        'be auto-applied — adjust in Inspector; clip and grade preserved'
+                    )
+                result.modified += 1
+                continue
+
+        # Volume-only changes never re-apply: AppendToTimeline cannot carry
+        # volume either, so a delete+re-add would lose the editor's grade for
+        # nothing. Consumed as modified even on failure, with a warning.
+        if category in ('video', 'audio') and changed == _VOLUME_FIELDS:
+            existing = _find_timeline_item(tl, ti_id) if ti_id else None
+            if existing is not None and _set_item_volume(existing, clip.get('volume')):
+                existing.AddMarker(
+                    frame=existing.GetStart(), color='Yellow',
+                    name='MML ONE: volume updated',
+                    note=f'Volume {clip.get("volume")} in MML ONE.',
+                    duration=1, custom_data='mml_one_volume',
+                )
+            else:
+                result.warnings.append(
+                    f'Volume for {change["id"]} changed in MML ONE — adjust manually; '
+                    'clip preserved'
+                )
+            result.modified += 1
+            continue
 
         local = cache / f'{clip["assetKey"].replace(":", "_")}.{_ext_for(clip)}'
         try:
@@ -581,6 +856,16 @@ def apply_diff(*,
             existing = _find_timeline_item(tl, ti_id)
             if existing is not None and existing.GetUniqueId() != new_item.GetUniqueId():
                 tl.DeleteClips([existing])
+
+        if category == 'image':
+            # The re-add carries timing only; transform still has to be
+            # pushed onto the fresh item.
+            if not _apply_transform(new_item, clip, canvas_w, canvas_h):
+                result.warnings.append(
+                    f'Could not auto-apply transform for {change["id"]} — adjust in Inspector'
+                )
+        elif category == 'video':
+            _flag_speed_mismatch(new_item, clip, result)
 
         new_item.SetClipColor('Yellow')
         new_item.AddMarker(

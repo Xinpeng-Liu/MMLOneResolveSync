@@ -7,7 +7,7 @@ STAGE="$(mktemp -d)"
 SCRIPTS_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE" "$SCRIPTS_DIR"' EXIT
 
-VERSION="$(grep -E "__version__" "$ROOT/mml_sync/__init__.py" | head -1 | cut -d "'" -f 2)"
+VERSION="$(grep -E "^PLUGIN_VERSION" "$ROOT/mml_sync/config.py" | head -1 | cut -d "'" -f 2)"
 [ -n "$VERSION" ] || { echo "Could not determine plugin version"; exit 1; }
 echo "Building MML ONE Resolve Sync $VERSION (.pkg)"
 

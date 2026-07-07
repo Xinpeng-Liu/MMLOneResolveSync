@@ -34,7 +34,7 @@ jobs:
       - name: Stamp version into filename
         id: artifact
         run: |
-          VERSION=$(grep -E "__version__" mml_sync/__init__.py | head -1 | cut -d "'" -f 2)
+          VERSION=$(grep -E "^PLUGIN_VERSION" mml_sync/config.py | head -1 | cut -d "'" -f 2)
           [ -n "$VERSION" ] || { echo "could not read plugin version"; exit 1; }
           DST="dist/macos/MMLOneResolveSync-v${VERSION}.pkg"
           mv dist/macos/MMLOneResolveSync.pkg "$DST"
@@ -76,7 +76,7 @@ jobs:
         id: artifact
         shell: bash
         run: |
-          VERSION=$(grep -E "__version__" mml_sync/__init__.py | head -1 | cut -d "'" -f 2)
+          VERSION=$(grep -E "^PLUGIN_VERSION" mml_sync/config.py | head -1 | cut -d "'" -f 2)
           [ -n "$VERSION" ] || { echo "could not read plugin version"; exit 1; }
           DST="dist/windows/MMLOneResolveSync-Setup-v${VERSION}.exe"
           mv dist/windows/MMLOneResolveSync-Setup.exe "$DST"

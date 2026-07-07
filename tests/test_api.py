@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest import mock
 
-from mml_sync import api
+from mml_sync import api, config
 
 
 def _fake_response(status: int, body: dict):
@@ -70,6 +70,20 @@ class TestApi(unittest.TestCase):
         )
         with self.assertRaises(api.AuthError):
             api.get_projects('https://api.example', token='bad')
+
+    def test_user_agent_carries_plugin_version(self):
+        self.assertIn(config.PLUGIN_VERSION, api.USER_AGENT)
+
+    @mock.patch('mml_sync.api.urlopen')
+    def test_revoke_self_posts_with_bearer_token(self, m):
+        m.return_value = _fake_response(200, {})
+        api.revoke_self('https://api.example', token='mml_t')
+        args, _ = m.call_args
+        req = args[0]
+        self.assertEqual(req.full_url, 'https://api.example/resolve/revoke-self')
+        self.assertEqual(req.get_method(), 'POST')
+        self.assertEqual(req.get_header('Authorization'), 'Bearer mml_t')
+        self.assertEqual(req.data, b'{}')
 
 
 if __name__ == '__main__':

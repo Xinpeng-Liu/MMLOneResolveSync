@@ -3,136 +3,45 @@
 Threading model: HTTP and media download run on a worker thread; the UI thread
 only updates labels via root.after(...). No mutable state shared without queues.
 """
-import os
 import queue
-import sys
 import threading
 import tkinter as tk
-import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import font as tkfont, messagebox, ttk
+from tkinter import messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
-from . import api, config, diff, resolve_apply, storage
+from . import api, config, diff, download, resolve_apply, storage
+from .widgets import (
+    apply_named_font_defaults as _apply_named_font_defaults,
+    attach_tooltip as _attach_tooltip,
+    font as _font,
+)
 
-
-def _ui_family() -> str:
-    if sys.platform.startswith('win'):
-        return 'Segoe UI'
-    if sys.platform.startswith('darwin'):
-        return 'Helvetica'
-    return 'DejaVu Sans'
-
-
-def _mono_family() -> str:
-    if sys.platform.startswith('win'):
-        return 'Consolas'
-    if sys.platform.startswith('darwin'):
-        return 'Menlo'
-    return 'DejaVu Sans Mono'
-
-
-def _font(size: int, weight: Optional[str] = None, mono: bool = False) -> tuple:
-    # Tk parses tuple-form font=('TkDefaultFont', N) as family='TkDefaultFont',
-    # not as the named font. On Windows that family lookup fails and Tk falls
-    # back to Times Roman 10pt. Use an explicit per-platform family instead.
-    family = _mono_family() if mono else _ui_family()
-    if weight:
-        return (family, size, weight)
-    return (family, size)
-
-
-def _apply_named_font_defaults() -> None:
-    # Belt-and-suspenders: retarget Tk's named fonts too so any widget that
-    # resolves them (menus, message boxes, ttk theme defaults) picks up the
-    # same family. Must be called after tk.Tk() — fonts don't exist before.
-    ui = _ui_family()
-    mono = _mono_family()
-    for name in (
-        'TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont',
-        'TkCaptionFont', 'TkSmallCaptionFont', 'TkIconFont', 'TkTooltipFont',
-    ):
-        try:
-            tkfont.nametofont(name).configure(family=ui)
-        except tk.TclError:
-            pass
-    try:
-        tkfont.nametofont('TkFixedFont').configure(family=mono)
-    except tk.TclError:
-        pass
+# Guarded so a stale config.py without the constant degrades to "no update
+# hint" instead of crashing the plugin at import time.
+PLUGIN_VERSION = getattr(config, 'PLUGIN_VERSION', '0')
 
 
 def _now_str() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-class _Tooltip:
-    """Tiny stdlib-only tooltip. Shows a borderless Toplevel on hover after a
-    short delay; hides it on leave or click. Wraps long text."""
-
-    DELAY_MS = 450
-    BG = '#2D2D2D'
-    FG = '#FFFFFF'
-
-    def __init__(self, widget: tk.Widget, text: str, wraplength: int = 280):
-        self.widget = widget
-        self.text = text
-        self.wraplength = wraplength
-        self._after_id: Optional[str] = None
-        self._tip: Optional[tk.Toplevel] = None
-        widget.bind('<Enter>', self._schedule, add='+')
-        widget.bind('<Leave>', self._cancel, add='+')
-        widget.bind('<ButtonPress>', self._cancel, add='+')
-
-    def _schedule(self, _evt=None) -> None:
-        self._cancel()
-        self._after_id = self.widget.after(self.DELAY_MS, self._show)
-
-    def _cancel(self, _evt=None) -> None:
-        if self._after_id is not None:
-            self.widget.after_cancel(self._after_id)
-            self._after_id = None
-        if self._tip is not None:
-            try:
-                self._tip.destroy()
-            except tk.TclError:
-                pass
-            self._tip = None
-
-    def _show(self) -> None:
-        if self._tip is not None:
-            return
-        x = self.widget.winfo_rootx() + 12
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        tip = tk.Toplevel(self.widget)
-        tip.overrideredirect(True)
-        # macOS-only: keep the tooltip on top of the Resolve window.
-        try:
-            tip.attributes('-topmost', True)
-        except tk.TclError:
-            pass
-        tk.Label(
-            tip, text=self.text,
-            bg=self.BG, fg=self.FG,
-            font=_font(11),
-            wraplength=self.wraplength,
-            justify='left', padx=10, pady=6,
-            bd=0, highlightthickness=0,
-        ).pack()
-        tip.geometry(f'+{x}+{y}')
-        self._tip = tip
-
-
-def _attach_tooltip(widget: tk.Widget, text: str) -> None:
-    """Convenience: ttk widgets like ttk.Combobox/ttk.Button accept the same
-    bindings as plain Tk widgets. Cursor hint goes hand-in-hand."""
-    _Tooltip(widget, text)
+def _parse_version(value: Any) -> Optional[tuple]:
+    # '0.3.0' → (0, 3, 0). Anything non-dotted-int → None (hint suppressed —
+    # a malformed server value must never break the projects fetch).
+    if not isinstance(value, str) or not value.strip():
+        return None
     try:
-        widget.configure(cursor='hand2')
-    except tk.TclError:
-        pass
+        return tuple(int(p) for p in value.strip().split('.'))
+    except ValueError:
+        return None
+
+
+def _version_newer(candidate: Any, current: str) -> bool:
+    a, b = _parse_version(candidate), _parse_version(current)
+    return a is not None and b is not None and a > b
 
 
 class App:
@@ -152,6 +61,7 @@ class App:
         self._selected_episode: Optional[Dict[str, Any]] = None
         self._active_target_updated_at: int = 0
         self._auto_target: bool = False  # True when current selection came from web hint
+        self._busy: bool = False  # one sync/import operation at a time
 
         self._events: 'queue.Queue[Callable[[], None]]' = queue.Queue()
         self._build_ui()
@@ -178,6 +88,7 @@ class App:
         self.hint_kicker_var = tk.StringVar(value='')
         self.hint_var = tk.StringVar(value='')
         self.last_sync_var = tk.StringVar(value='—')
+        self.update_var = tk.StringVar(value='')  # non-empty ⇒ newer build exists
         self._selector_open = False
 
     def _clear_container(self) -> None:
@@ -279,6 +190,13 @@ class App:
             'Forget the device token saved on this Mac. You can pair again '
             'with a new 6-digit code at any time.',
         )
+
+        # ---- update hint — empty unless /resolve/projects reports newer ----
+        self.update_label = ttk.Label(
+            frm, textvariable=self.update_var,
+            foreground='#b60', font=_font(11),
+        )
+        self.update_label.pack(anchor='w')
 
         # ---- active target hint — promoted to primary signal ----
         # Two lines: a small label + a bigger value, easier to scan than one
@@ -456,6 +374,32 @@ class App:
     def _post(self, fn: Callable[[], None]) -> None:
         self._events.put(fn)
 
+    def _set_busy(self, busy: bool) -> None:
+        """One latch for the three operation buttons. Entry points early-return
+        while busy, so two workers can never mutate the same timeline + mapping
+        concurrently. On release, button state re-derives from the episode
+        selection instead of blanket-enabling."""
+        self._busy = busy
+        state = 'disabled' if (busy or self._selected_episode is None) else 'normal'
+        for name in ('sync_btn', 'force_btn', 'media_btn'):
+            btn = getattr(self, name, None)
+            if btn is None:
+                continue
+            try:
+                if btn.winfo_exists():
+                    btn.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _maybe_show_update_hint(self, latest: Any) -> None:
+        # No nagging dialogs — a quiet label plus one log line per version.
+        if not _version_newer(latest, PLUGIN_VERSION):
+            return
+        text = f'Update available: v{latest} — download from MML ONE Settings'
+        if self.update_var.get() != text:
+            self.update_var.set(text)
+            self._log(f'Update available: v{latest} (installed: v{PLUGIN_VERSION})')
+
     # ---- pair ----
 
     def _on_pair(self) -> None:
@@ -532,12 +476,27 @@ class App:
         self._fetch_projects()
 
     def _on_disconnect(self) -> None:
+        if self._busy:
+            self._log('Sync in progress — sign out after it finishes.')
+            return
         if not messagebox.askokcancel(
             'Sign out of MML ONE Sync',
             'Forget the saved device token on this Mac? '
             'You can pair again later with a fresh 6-digit code.',
         ):
             return
+        # Best-effort server-side revoke with the token read before clearing.
+        # Local sign-out proceeds regardless — never block the UI on network.
+        token = (self._device or {}).get('token')
+        if token:
+            def revoke_worker(token=token):
+                try:
+                    api.revoke_self(self.api_base, token=token)
+                except Exception:
+                    self._post(lambda: self._log(
+                        'server-side revoke failed — revoke from MML ONE Settings'
+                    ))
+            threading.Thread(target=revoke_worker, daemon=True).start()
         storage.clear_device(self.data_root)
         self._device = None
         self._projects = []
@@ -553,7 +512,7 @@ class App:
         def worker():
             try:
                 out = api.get_projects(self.api_base, token=self._device['token'])
-                self._post(lambda: self._populate_projects(out['projects']))
+                self._post(lambda: self._populate_projects(out))
             except api.AuthError:
                 self._post(self._on_unauth)
             except api.ApiError as e:
@@ -564,12 +523,14 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _populate_projects(self, projects: List[Dict[str, Any]]) -> None:
+    def _populate_projects(self, out: Dict[str, Any]) -> None:
+        projects = out.get('projects') or []
         self._projects = projects
         self.proj_combo['values'] = [p['name'] for p in projects]
         if projects:
             self.proj_combo.current(0)
             self._on_project_change()
+        self._maybe_show_update_hint(out.get('latestVersion'))
 
     def _on_project_change(self, _evt=None) -> None:
         # Manual selection overrides the auto-target hint until the user
@@ -641,6 +602,10 @@ class App:
                 return
         except tk.TclError:
             return
+        # Mid-operation the selection must not change under the worker. Skip
+        # WITHOUT recording updatedAt so the next poll tick retries.
+        if self._busy:
+            return
         proj_id = target.get('projectId')
         ep_id = target.get('episodeId')
 
@@ -690,17 +655,29 @@ class App:
         self._active_target_updated_at = int(target.get('updatedAt', 0))
 
     def _on_unauth(self) -> None:
+        # Posted by any worker that hits a 401. Several can race — only the
+        # first teardown runs; later ones see _device is None and bail.
+        if self._device is None:
+            return
         storage.clear_device(self.data_root)
         self._device = None
-        self.status_var.set('Token revoked. Pair again.')
-        self.pair_btn.configure(state='normal')
-        self.sync_btn.configure(state='disabled')
-        self.force_btn.configure(state='disabled')
-        self.media_btn.configure(state='disabled')
+        self._projects = []
+        self._selected_project = None
+        self._selected_episode = None
+        self._set_busy(False)
+        self.status_var.set('Not paired')
+        messagebox.showwarning(
+            'Session expired',
+            'This device was revoked or the token expired. '
+            'Pair again with a new 6-digit code.',
+        )
+        self._show_welcome()
 
     # ---- force sync ----
 
     def _on_force_sync(self) -> None:
+        if self._busy:
+            return
         if not self._device or not self._selected_project or not self._selected_episode:
             return
         ep_idx = self.ep_combo.current()
@@ -728,8 +705,7 @@ class App:
         proj_id = self._selected_project['projectId']
         ep_id = self._selected_episode['episodeId']
         self._log(f'Force sync: resetting "{timeline_name}"…')
-        self.sync_btn.configure(state='disabled')
-        self.force_btn.configure(state='disabled')
+        self._set_busy(True)
 
         def worker():
             # 1. Wipe Resolve-side: target timeline + previously-imported media.
@@ -764,8 +740,7 @@ class App:
                 err_msg = str(e)
                 return self._post(lambda err_msg=err_msg: (
                     self._log(f'Fetch failed: {err_msg}'),
-                    self.sync_btn.configure(state='normal'),
-                    self.force_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
 
             prev_state = self._empty_state(next_state)
@@ -777,6 +752,8 @@ class App:
     # ---- sync ----
 
     def _on_preview_sync(self) -> None:
+        if self._busy:
+            return
         if not self._device or not self._selected_project or not self._selected_episode:
             return
         ep_idx = self.ep_combo.current()
@@ -789,7 +766,7 @@ class App:
         ep_id = self._selected_episode['episodeId']
 
         self._log('Fetching latest timeline…')
-        self.sync_btn.configure(state='disabled')
+        self._set_busy(True)
 
         def worker():
             try:
@@ -802,12 +779,11 @@ class App:
                 err_msg = str(e)
                 return self._post(lambda err_msg=err_msg: (
                     self._log(f'Fetch failed: {err_msg}'),
-                    self.sync_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
 
-            prev_state = (
-                storage.load_snapshot(self.data_root, proj_id, ep_id)
-                or self._empty_state(next_state)
+            prev_state = self._load_compatible_snapshot(
+                self.data_root, proj_id, ep_id, next_state,
             )
 
             # Reconcile manual deletions in Resolve (user removed media or
@@ -833,6 +809,24 @@ class App:
             self._post(lambda: self._show_preview(prev_state, next_state, d))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _load_compatible_snapshot(self, root: Path, project_id: str,
+                                  episode_id: str,
+                                  like_state: Dict[str, Any]) -> Dict[str, Any]:
+        # docs/RESOLVE_SYNC.md contract: an unknown snapshot schema version is
+        # treated as "no snapshot" so everything re-applies as added instead
+        # of mis-diffing against a shape this build doesn't understand.
+        # Worker-thread callers only — the log line goes through _post.
+        snap = storage.load_snapshot(root, project_id, episode_id)
+        if snap is None:
+            return self._empty_state(like_state)
+        ver = snap.get('schemaVersion')
+        if ver != config.SYNC_SCHEMA_VERSION:
+            self._post(lambda v=ver: self._log(
+                f'snapshot schema v{v} ≠ v{config.SYNC_SCHEMA_VERSION} — full re-sync'
+            ))
+            return self._empty_state(like_state)
+        return snap
 
     def _empty_state(self, like: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -888,6 +882,8 @@ class App:
         btns = ttk.Frame(win); btns.pack(pady=(0, 12))
 
         def apply_now():
+            # Busy is already held from the entry point that opened this
+            # dialog and stays held through _apply's worker.
             win.destroy()
             self._apply(prev, nxt, d)
 
@@ -895,59 +891,57 @@ class App:
 
         def cancel():
             win.destroy()
-            self.sync_btn.configure(state='normal')
-            self.force_btn.configure(state='normal')
+            self._set_busy(False)
 
         ttk.Button(btns, text='Cancel', command=cancel).pack(side='left')
+        # Window-manager close must release the busy latch like Cancel does.
+        win.protocol('WM_DELETE_WINDOW', cancel)
+
+    def _prefetch_media(self, project_id: str,
+                        items: List[Dict[str, Any]]) -> Dict[str, Optional[int]]:
+        """Worker-thread only. Parallel-download the items' media so the apply
+        loop hits warm cache files; a miss still self-heals inline. Returns
+        the url → declared-size map the per-item downloader validates against."""
+        cache = config.media_cache_dir(self.data_root, project_id)
+        cache.mkdir(parents=True, exist_ok=True)
+        jobs = download.media_jobs(items, cache)
+        if jobs:
+            results = download.prefetch(
+                jobs, max_bytes=config.MEDIA_MAX_BYTES,
+                timeout=config.HTTP_READ_TIMEOUT,
+            )
+            self._post(lambda s=download.summary_line(results): self._log(
+                f'Media prefetch: {s}'
+            ))
+        return {url: size for url, _dest, size in jobs}
+
+    def _cache_downloader(
+        self, size_by_url: Dict[str, Optional[int]],
+    ) -> Callable[[str, Path], Path]:
+        return lambda url, dest: download.cached_or_download(
+            url, dest, expected_size=size_by_url.get(url),
+            max_bytes=config.MEDIA_MAX_BYTES, timeout=config.HTTP_READ_TIMEOUT,
+        )
 
     def _apply(self, prev: Dict[str, Any], nxt: Dict[str, Any], d: Dict[str, Any]) -> None:
         timeline_name = (
             f'MML ONE - {nxt.get("projectName", "")} - {nxt.get("episodeName", "")}'.strip()
         )
 
-        def downloader(url: str, dest: Path) -> Path:
-            """Atomic + size-bounded download. Writes to <dest>.tmp, verifies size,
-            then os.replace to <dest>. A network drop or oversized response leaves
-            no partial file at the cache path Resolve will read from."""
-            tmp = dest.with_suffix(dest.suffix + '.tmp')
-            try:
-                with urllib.request.urlopen(url, timeout=config.HTTP_READ_TIMEOUT) as r:
-                    declared = int(r.headers.get('Content-Length') or 0)
-                    if declared and declared > config.MEDIA_MAX_BYTES:
-                        raise IOError(
-                            f'media too large: {declared} > {config.MEDIA_MAX_BYTES}'
-                        )
-                    written = 0
-                    with open(tmp, 'wb') as f:
-                        while True:
-                            chunk = r.read(1 << 20)
-                            if not chunk:
-                                break
-                            written += len(chunk)
-                            if written > config.MEDIA_MAX_BYTES:
-                                raise IOError(
-                                    f'media exceeded {config.MEDIA_MAX_BYTES} bytes mid-stream'
-                                )
-                            f.write(chunk)
-                    if declared and written != declared:
-                        raise IOError(f'short download: {written}/{declared}')
-                os.replace(tmp, dest)
-            except Exception:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
-            return dest
-
         def worker():
             try:
+                size_by_url = self._prefetch_media(
+                    nxt['projectId'],
+                    [c['after'] for c in d['added']]
+                    + [c['after'] for c in d['modified']
+                       if resolve_apply.modification_needs_media(c)],
+                )
                 result = resolve_apply.apply_diff(
                     resolve=self.resolve, root=self.data_root,
                     project_id=nxt['projectId'], episode_id=nxt['episodeId'],
                     timeline_name=timeline_name,
                     current_state=nxt, diff=d,
-                    downloader=downloader,
+                    downloader=self._cache_downloader(size_by_url),
                 )
                 if result.skipped == 0:
                     storage.save_snapshot(
@@ -957,25 +951,24 @@ class App:
                     self._post(lambda c=result.skipped: self._log(
                         f'{c} item(s) skipped — snapshot NOT advanced; next sync will retry'
                     ))
-                api.heartbeat(self.api_base, token=self._device['token'])
                 self._post(lambda: self._after_apply(result))
             except resolve_apply.FrameRateMismatch as e:
                 err_msg = str(e)
                 self._post(lambda err_msg=err_msg: (
                     messagebox.showerror('Frame rate mismatch', err_msg),
-                    self.sync_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
             except resolve_apply.TimelineNotFound as e:
                 err_msg = str(e)
                 self._post(lambda err_msg=err_msg: (
                     messagebox.showerror('No project open', err_msg),
-                    self.sync_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
             except Exception as e:
                 err_msg = str(e)
                 self._post(lambda err_msg=err_msg: (
                     self._log(f'Apply failed: {err_msg}'),
-                    self.sync_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -983,6 +976,8 @@ class App:
     # ---- import-media-only ----
 
     def _on_import_media(self) -> None:
+        if self._busy:
+            return
         if not self._device or not self._selected_project or not self._selected_episode:
             return
         ep_idx = self.ep_combo.current()
@@ -995,39 +990,7 @@ class App:
         ep_id = self._selected_episode['episodeId']
 
         self._log('Import Media: fetching latest timeline state…')
-        self.sync_btn.configure(state='disabled')
-        self.force_btn.configure(state='disabled')
-        self.media_btn.configure(state='disabled')
-
-        def downloader(url: str, dest: Path) -> Path:
-            tmp = dest.with_suffix(dest.suffix + '.tmp')
-            try:
-                with urllib.request.urlopen(url, timeout=config.HTTP_READ_TIMEOUT) as r:
-                    declared = int(r.headers.get('Content-Length') or 0)
-                    if declared and declared > config.MEDIA_MAX_BYTES:
-                        raise IOError(f'media too large: {declared} > {config.MEDIA_MAX_BYTES}')
-                    written = 0
-                    with open(tmp, 'wb') as f:
-                        while True:
-                            chunk = r.read(1 << 20)
-                            if not chunk:
-                                break
-                            written += len(chunk)
-                            if written > config.MEDIA_MAX_BYTES:
-                                raise IOError(
-                                    f'media exceeded {config.MEDIA_MAX_BYTES} bytes mid-stream'
-                                )
-                            f.write(chunk)
-                    if declared and written != declared:
-                        raise IOError(f'short download: {written}/{declared}')
-                os.replace(tmp, dest)
-            except Exception:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
-            return dest
+        self._set_busy(True)
 
         def worker():
             try:
@@ -1040,25 +1003,27 @@ class App:
                 err_msg = str(e)
                 return self._post(lambda err_msg=err_msg: (
                     self._log(f'Fetch failed: {err_msg}'),
-                    self.sync_btn.configure(state='normal'),
-                    self.force_btn.configure(state='normal'),
-                    self.media_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
             try:
+                # Prefetch over the distinct assets of all three buckets —
+                # import_media_only dedupes by assetKey the same way.
+                size_by_url = self._prefetch_media(proj_id, [
+                    c for bucket in ('clips', 'imageOverlays', 'audioClips')
+                    for c in (next_state.get(bucket) or [])
+                ])
                 result = resolve_apply.import_media_only(
                     resolve=self.resolve, root=self.data_root,
                     project_id=proj_id, episode_id=ep_id,
-                    current_state=next_state, downloader=downloader,
+                    current_state=next_state,
+                    downloader=self._cache_downloader(size_by_url),
                 )
-                api.heartbeat(self.api_base, token=token)
                 self._post(lambda r=result: self._after_import_media(r))
             except Exception as e:
                 err_msg = str(e)
                 self._post(lambda err_msg=err_msg: (
                     self._log(f'Import Media failed: {err_msg}'),
-                    self.sync_btn.configure(state='normal'),
-                    self.force_btn.configure(state='normal'),
-                    self.media_btn.configure(state='normal'),
+                    self._set_busy(False),
                 ))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1070,9 +1035,7 @@ class App:
         )
         for w in result.warnings:
             self._log(f'Warning: {w}')
-        self.sync_btn.configure(state='normal')
-        self.force_btn.configure(state='normal')
-        self.media_btn.configure(state='normal')
+        self._set_busy(False)
 
     def _after_apply(self, result: resolve_apply.ApplyResult) -> None:
         self._log(
@@ -1082,8 +1045,7 @@ class App:
         for w in result.warnings:
             self._log(f'Warning: {w}')
         self.last_sync_var.set(f'Last synced {_now_str()}')
-        self.sync_btn.configure(state='normal')
-        self.force_btn.configure(state='normal')
+        self._set_busy(False)
 
 
 def main(resolve_obj: Any) -> None:

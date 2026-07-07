@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 
 from . import config
 
-USER_AGENT = 'MMLOne-ResolveSync/0.1 (urllib)'
+USER_AGENT = f'MMLOne-ResolveSync/{config.PLUGIN_VERSION} (urllib)'
 
 
 class ApiError(Exception):
@@ -67,6 +67,12 @@ def get_timeline_state(base: str, *, token: str, project_id: str, episode_id: st
 
 def heartbeat(base: str, *, token: str) -> None:
     _request('POST', f'{base}/resolve/heartbeat', token=token, body={})
+
+
+def revoke_self(base: str, *, token: str) -> None:
+    """Revoke this device's own token from inside the plugin. The token is
+    invalid immediately after; the caller must clear the local device file."""
+    _request('POST', f'{base}/resolve/revoke-self', token=token, body={})
 
 
 def get_active_target(base: str, *, token: str) -> Dict[str, Any]:

@@ -4,8 +4,14 @@ from pathlib import Path
 
 from mml_sync import diff
 
-# Bundled diff fixture (mirror of the TS-side golden, kept in sync per release).
-FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'sync-diff-basic.json'
+# Golden fixture shared with the TS side. Two layouts exist: this repo keeps
+# it at nle/__fixtures__/ (single source next to sync-diff.ts); the public
+# MMLOneResolveSync mirror is flat and carries a copy under tests/fixtures/.
+_FIXTURE_CANDIDATES = (
+    Path(__file__).resolve().parents[2] / 'nle' / '__fixtures__' / 'sync-diff-basic.json',
+    Path(__file__).resolve().parent / 'fixtures' / 'sync-diff-basic.json',
+)
+FIXTURE = next((p for p in _FIXTURE_CANDIDATES if p.is_file()), _FIXTURE_CANDIDATES[0])
 
 
 class TestDiff(unittest.TestCase):

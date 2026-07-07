@@ -5,12 +5,16 @@ import os
 
 SYNC_SCHEMA_VERSION = 1
 
+# Single source of truth for the plugin version. __init__.__version__ and
+# api.USER_AGENT both derive from this.
+PLUGIN_VERSION = '0.3.0'
+
 # Edit before shipping a build to point at your prod Convex deployment.
 # Override via the MMLONE_API_BASE_URL env var (set by the user before launching Resolve).
 DEFAULT_API_BASE_URL = 'https://beaming-pony-705.convex.site'
 
-# Connection + read timeouts in seconds for HTTP calls.
-HTTP_CONNECT_TIMEOUT = 10
+# Single timeout in seconds covering connect + read. urllib's urlopen takes one
+# timeout, not separate connect/read values.
 HTTP_READ_TIMEOUT = 60
 
 # How big a media download we'll attempt. Fail fast above this and tell the user

@@ -1,2 +1,2 @@
 """MML ONE Resolve sync plugin (in-Resolve scripting client)."""
-__version__ = '0.2.2'
+from .config import PLUGIN_VERSION as __version__

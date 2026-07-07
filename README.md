@@ -26,7 +26,19 @@ After install, open DaVinci Resolve and pick **Workspace → Scripts → Edit �
 
 - **Preview Sync** — incremental, applies only changes since last sync. Reconciles drift.
 - **Force Sync** — wipes the target timeline + previously imported media, rebuilds from scratch.
-- **Import Media Only** — drops MML ONE-generated media into Resolve's Media Pool without touching any timeline.
+- **Import Media Only** — drops MML ONE-generated media into an "MML ONE" bin in Resolve's Media Pool without touching any timeline.
+
+## What lands in Resolve
+
+- Image transform (position / scale / rotation / opacity) and volume changes apply **in place** — your color grade survives them.
+- Timing or asset changes re-apply the clip (delete + re-add, marked yellow); per-clip Resolve work on that clip is dropped.
+- Clips removed in MML ONE stay on the timeline with a red marker.
+- Clip speed isn't scriptable — speed ≠ 1x clips land at 1x with a blue marker; set the retime manually.
+- Partial failures (network drop, missing media) retry safely on the next click — already-placed clips are never duplicated.
+
+## Security
+
+The device token in `~/.mmlone/resolve-sync/device.json` is DPAPI-encrypted on Windows and mode `0600` on macOS/Linux. **Sign out** in the plugin revokes the token server-side too; you can always revoke from MML ONE → Settings → DaVinci Resolve sync.
 
 ## Build from source
 
